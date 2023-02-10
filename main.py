@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.websockets import WebSocket
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from passlib.context import CryptContext
 from pyrebase import pyrebase
 import os
 import uvicorn
+import json
 import traceback
 from dotenv import load_dotenv
 
@@ -43,12 +45,16 @@ config = {
 
 # firebase initialization
 firebase = pyrebase.initialize_app(config)
-auth = firebase.auth()
+firebaseauth = firebase.auth()
+
+# connected clients
+clients = []
+
 
 @app.post("/create_user")
 async def create_user(user: User):
     try:
-        authuser = auth.create_user_with_email_and_password(user.email, user.password)
+        authuser = firebaseauth.create_user_with_email_and_password(user.email, user.password)
     except Exception as e:
         if "EMAIL_EXISTS" in str(e):
             return "ERROR: Email already exists"
@@ -57,22 +63,23 @@ async def create_user(user: User):
         elif "WEAK_PASSWORD" in str(e):
             return "ERROR: Password is too weak"
         else:
-            return "ERROR: Something went wrong"
+            return "ERROR: Something went wrong: " + str(e)
+    print(authuser)
     try:
         # update display name
-        auth.update_user(authuser["localId"], display_name=user.display_name)
+        firebaseauth.update_profile(authuser["idToken"], display_name=user.display_name)
     except Exception as e:
         if "USER_NOT_FOUND" in str(e):
             return "ERROR: User not found"
         else:
-            return "ERROR: Something went wrong"
+            return "ERROR: Something went wrong: " + str(e)
 
     return authuser["idToken"]
 
 @app.post("/login")
 async def login(user: User):
     try:
-        user = auth.sign_in_with_email_and_password(user.email, user.password)
+        user = firebaseauth.sign_in_with_email_and_password(user.email, user.password)
         return user["idToken"]
     except Exception as e:
         if "INVALID_PASSWORD" in str(e):
@@ -80,18 +87,7 @@ async def login(user: User):
         elif "EMAIL_NOT_FOUND" in str(e):
             return "ERROR: Email not found"
         else:
-            return "ERROR: Something went wrong"
-
-# @app.get("/logout")
-# async def logout(request: Request):
-#     # get cookies
-#     cookies = request.cookies
-#     if "token" in cookies:
-#         # delete token from cookies
-#         del cookies["token"]
-#         return templates.TemplateResponse("loginpage.html", {"request": request, "user": None})
-#     else:
-#         return templates.TemplateResponse("loginpage.html", {"request": request, "user": None})
+            return "ERROR: Something went wrong: " + str(e)
 
 @app.get("/")
 async def root(request: Request):
@@ -102,15 +98,31 @@ async def root(request: Request):
         token = cookies["token"]
         try:
             # verify token
-            decoded_token = auth.get_account_info(token)
+            decoded_token = firebaseauth.get_account_info(token)
             print(decoded_token)
-            return templates.TemplateResponse("welcome.html", {"request": request, "username": decoded_token["users"][0]["displayName"]})
+            return templates.TemplateResponse("chat.html", {"request": request, "username": decoded_token["users"][0]["displayName"]})
         except Exception as e:
             # print traceback
             traceback.print_exc()
             return templates.TemplateResponse("loginpage.html", {"request": request, "user": None})
     else:
         return templates.TemplateResponse("loginpage.html", {"request": request, "user": None})
+    
+# create websocket connection for chat
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    clients.append(websocket)
+    while True:
+        try:
+            data = await websocket.receive_text()
+        except Exception as e:
+            # remove client from list
+            clients.remove(websocket)
+        
+        # send message to all connected clients
+        for client in clients:
+            await client.send_text(data)
     
 
 # run the app
